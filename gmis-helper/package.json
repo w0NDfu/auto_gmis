@@ -1,0 +1,9 @@
+{
+  "name": "gmis-account-helper",
+  "version": "0.4.1",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=20"},
+  "scripts": {"start": "node server.js", "test": "node tests/run.js"},
+  "dependencies": {"playwright-core": "1.64.1"}
+}

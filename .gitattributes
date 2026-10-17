@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.cmd text eol=crlf
+# Vendored OCR files have recorded hashes and must retain their original bytes.
+gmis-extension/vendor/** -text
