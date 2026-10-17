@@ -1,4 +1,4 @@
-# 北化报名助手 · 本机多账号后台 0.4.1
+# GMIS 报名助手 · 本机多账号后台 0.4.1
 
 与相邻 `gmis-extension` 一起使用。双击 `start-helper.cmd`，把窗口内配对码粘贴到扩展控制台，再在扩展的「自动登录设置」添加多个账号。
 
@@ -10,7 +10,7 @@
 
 登录分步诊断版（build `login-steps-20261017`）：启动窗口应显示「0.4.1 · 登录分步诊断版」。登录按钮不再隐式等待后续导航加载，改由认证和学号检查确认结果；页面导航在响应提交时返回，不因无关静态资源拖延而卡在浏览器默认 15 秒等待。用户名、密码和提交按钮优先用稳定的可见控件选择器定位，避免动态隐藏字段改变序号。后台逐步打印开始、完成、耗时和失败位置；控制台收到的超时会包含具体步骤和去除查询参数的当前页面路径，不再把所有底层异常归因于 Chrome 或网络。保留认证、学号和会话隔离检查，未对真实账号提交登录进行验证。更新仍只需重启后台，不必重新加载现有 0.4.1 扩展。
 
-登录顺序为用户指定的 `https://sidportal.buct.edu.cn/login?service=https:%2F%2Fi.buct.edu.cn%2F` → i 北化 → 研究生系统的 `https://gmis.buct.edu.cn/oauthLogin/bjhgdx` → 受保护的 GMIS 主页。只有主页实际学号与配置一致才标为登录成功。原生表单继续负责学校的加密、CSRF、流转字段和跨站跳转；不读取或复用用户当前 Chrome 的 Cookie。
+登录顺序为用户指定的 `https://sidportal.buct.edu.cn/login?service=https:%2F%2Fi.buct.edu.cn%2F` → 校园门户 → 研究生系统的 `https://gmis.buct.edu.cn/oauthLogin/bjhgdx` → 受保护的 GMIS 主页。只有主页实际学号与配置一致才标为登录成功。原生表单继续负责学校的加密、CSRF、流转字段和跨站跳转；不读取或复用用户当前 Chrome 的 Cookie。
 
 没有登录图形验证码时不调用识别；数字图形码出现后按会话绑定识别。短信、滑块或其他二次验证不当作图形码处理，会明确提示自动流程未完成。可在扩展选择「GMIS 独立登录」使用旧入口。
 
@@ -25,6 +25,6 @@
 
 开发：`npm test` 使用模拟浏览器上下文与本地 HTTP 测试，不访问学校、不登录、不报名。`python package_helper.py` 生成不含依赖和秘密的 `gmis-helper.zip`。
 
-本实现已确认 i 北化页面中的研究生系统入口，并完成模拟流程、会话隔离和身份核验测试；尚未填写真实凭据测试统一认证或实际报名。验证码识别准确率取决于学校图片。若选错密码类型，在控制台移除该账号后用正确登录方式重新添加。
+本实现已确认 校园门户页面中的研究生系统入口，并完成模拟流程、会话隔离和身份核验测试；尚未填写真实凭据测试统一认证或实际报名。验证码识别准确率取决于学校图片。若选错密码类型，在控制台移除该账号后用正确登录方式重新添加。
 
 参考：[独立 BrowserContext](https://playwright.dev/docs/api/class-browser#browser-new-context)、[共享会话的请求上下文](https://playwright.dev/docs/api/class-apirequestcontext)、[本机 Chrome channel](https://playwright.dev/docs/browsers#google-chrome--microsoft-edge)。
