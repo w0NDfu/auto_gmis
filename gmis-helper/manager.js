@@ -15,7 +15,7 @@ export function fail(message, code = "INVALID_REQUEST") { return Object.assign(n
 const mask = value => value.length < 5 ? "••••" : value.slice(0, 2) + "••••" + value.slice(-2);
 
 export class AccountManager {
-  constructor(browserFactory, {now = Date.now, leaseMs = 45000, waitLogin = waitForLogin, identityReader = waitForIdentity, sso, report} = {}) {
+  constructor(browserFactory, {now = Date.now, leaseMs = 180000, waitLogin = waitForLogin, identityReader = waitForIdentity, sso, report} = {}) {
     Object.assign(this, {browserFactory, now, leaseMs, waitLogin, identityReader, report});
     this.accounts = new Map();
     this.sso = sso || new SSOLogin({now});
@@ -99,18 +99,23 @@ export class AccountManager {
   }
   active(account) { return account.run && account.run.expires > this.now(); }
   validateRun(account, runId) {
-    if (!this.active(account) || account.run.id !== runId) throw fail("任务已停止或控制台连接已失效", "RUN_EXPIRED");
+    if (account.run?.id !== runId || !runId) throw fail("任务已停止、被其他任务替换或后台已重启，请重新启动任务", "RUN_EXPIRED");
+    if (!this.active(account)) {
+      const gap = Math.max(0, Math.floor((this.now() - account.run.renewedAt) / 1000));
+      throw fail(`任务续租超时：最近 ${gap} 秒未收到有效续租，请重新启动任务`, "RUN_EXPIRED");
+    }
   }
   start(id) {
     const account = this.get(id);
     if (!account.ready) throw fail("请先登录账号");
     if (this.active(account)) throw fail("该账号已有任务在运行");
-    account.run = {id: randomUUID(), expires: this.now() + this.leaseMs};
-    return {runId: account.run.id};
+    account.run = {id: randomUUID(), renewedAt: this.now(), expires: this.now() + this.leaseMs};
+    return {runId: account.run.id, leaseMs: this.leaseMs};
   }
   heartbeat(id, runId) {
     const account = this.get(id); this.validateRun(account, runId);
     account.run.expires = this.now() + this.leaseMs;
+    account.run.renewedAt = this.now();
     return {alive: true};
   }
   stop(id, runId) {

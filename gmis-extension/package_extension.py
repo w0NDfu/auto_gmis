@@ -5,7 +5,7 @@ from pathlib import Path
 import zipfile
 
 root = Path(__file__).resolve().parent
-runtime = ["manifest.json", "background.js", "catalog.js", "categories.js", "core.js", "engine.js", "multi-engine.js",
+runtime = ["manifest.json", "background.js", "run-heartbeat.js", "catalog.js", "categories.js", "core.js", "engine.js", "multi-engine.js",
            "ocr.js", "helper-api.js", "multi.html", "multi.js", "multi.css", "dashboard.html", "redirect.js", "dashboard.css", "README.md", "MULTI_ACCOUNT.md", "THIRD_PARTY_NOTICES.md"]
 manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 assert manifest["manifest_version"] == 3

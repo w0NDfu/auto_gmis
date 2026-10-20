@@ -1,6 +1,7 @@
 import {HelperClient, HelperAPI, QueuedOCR} from "./helper-api.js";
 import {LocalOCR} from "./ocr.js";
 import {MultiEngine, projectKey, categoryLabel} from "./multi-engine.js";
+import {RunHeartbeat} from "./run-heartbeat.js";
 import {matches, parseTime, countdown} from "./core.js";
 
 const $ = id => document.getElementById(id);
@@ -95,7 +96,7 @@ async function action(operation) {
 $("pair").onclick = () => action(async () => {
   const candidate = new HelperClient($("pair-token").value.trim());
   const health = await candidate.call("/health");
-  if (health.version !== "0.4.2") throw new Error("后台仍是旧版，请关闭旧后台并重新运行 start-helper.cmd，再复制新的配对码");
+  if (health.version !== "0.4.3") throw new Error("后台仍是旧版，请关闭旧后台并重新运行 start-helper.cmd，再复制新的配对码");
   client = candidate; accounts.clear(); current = undefined;
   health.accounts.forEach(remember); $("pair-token").value = "";
   log(null, `后台 ${health.version} 已连接。账号会话彼此独立，可在此添加多个账号。`);
@@ -157,25 +158,28 @@ async function runAccount(account, settings) {
     journal: async entry => { account.lastTask = entry; }});
   // Set job before any awaits to make duplicate starts impossible in this console.
   const job = {api, engine, stopping: false}; account.job = job; account.state = {phase: "starting"};
-  let heartbeat;
+  const failHeartbeat = error => {
+    if (job.stopping || account.job !== job || job.heartbeatFailure) return;
+    job.heartbeatFailure = error; engine.stop();
+    log(account, "任务续租失败，已停止：" + error.message, true);
+    if (api.runId) void client.call("/runs/stop", api.args()).catch(() => {});
+  };
+  const heartbeat = new RunHeartbeat({onFailure: failHeartbeat, onNotice: notice =>
+    log(account, notice.type === "recovered" ? "任务续租已恢复。" : notice.message)});
+  job.heartbeat = heartbeat;
   try {
     api.runId = (await client.call("/runs/start", {id: account.id})).runId;
     if (job.stopping) return;
-    let heartbeating = false;
-    heartbeat = setInterval(async () => {
-      if (heartbeating || job.stopping) return;
-      heartbeating = true;
-      try { await client.call("/runs/heartbeat", api.args()); }
-      catch (error) { engine.stop(); log(account, "后台连接中断，任务已停止：" + error.message, true); }
-      finally { heartbeating = false; }
-    }, 10000);
+    await heartbeat.start({token: client.token, ...api.args()});
+    if (job.stopping) return;
+    if (job.heartbeatFailure) throw job.heartbeatFailure;
     log(account, `任务已启动：${targets.length} 个项目；并发查询，同账号依次提交；重试间隔 ${settings.intervalSeconds} 秒。`);
     await engine.run(targets, settings);
   } catch (error) {
     if (error.code === "SESSION_EXPIRED") account.ready = false;
     account.state = {phase: job.stopping ? "stopped" : "error"}; log(account, error.message, !job.stopping);
   } finally {
-    clearInterval(heartbeat);
+    heartbeat.close();
     if (api.runId) await client.call("/runs/stop", api.args()).catch(error => log(account, error.message, true));
     if (job.stopping) account.state = {phase: "stopped"};
     account.job = null;
@@ -196,7 +200,7 @@ $("start").onclick = () => action(async () => {
 });
 async function stop(account) {
   const job = account?.job; if (!job) return;
-  job.stopping = true; job.engine.stop();
+  job.stopping = true; job.engine.stop(); job.heartbeat?.close();
   if (job.api.runId) {
     try { await client.call("/runs/stop", job.api.args()); }
     catch (error) { log(account, "停止指令未送达后台：" + error.message + "；任务租约到期后禁止新提交。", true); }
@@ -218,6 +222,7 @@ $("category").onchange = () => { renderProjects(); };
 window.addEventListener("beforeunload", () => {
   for (const account of accounts.values()) if (account.job) {
     account.job.engine.stop();
+    account.job.heartbeat?.close();
     if (account.job.api.runId) void client.call("/runs/stop", account.job.api.args(), {keepalive: true}).catch(() => {});
   }
 });

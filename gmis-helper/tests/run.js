@@ -10,6 +10,7 @@ import "./sso.test.js";
 import "./sso-form.test.js";
 import "./identity.test.js";
 import "./operations.test.js";
+import {LeaseKeeper} from "../../gmis-extension/run-heartbeat.js";
 
 function harness(options) {
   const contexts = [], requests = [];
@@ -91,9 +92,30 @@ test("leases expire and old console stop commands cannot cancel a new run", asyn
   const old = h.manager.start(a.id).runId;
   assert.throws(() => h.manager.start(a.id), /已有任务/);
   now = 101;
-  await assert.rejects(h.manager.request(a.id, {category: "labour", operation: "captcha", runId: old}), /失效/);
+  await assert.rejects(h.manager.request(a.id, {category: "labour", operation: "captcha", runId: old}), cause => cause.code === "RUN_EXPIRED" && /续租超时/.test(cause.message));
   const next = h.manager.start(a.id).runId; h.manager.stop(a.id, old);
   assert.equal(h.manager.heartbeat(a.id, next).alive, true);
+});
+
+test("worker heartbeat keeps real account lease active beyond five minutes without page timers, then stops immediately", async () => {
+  let now = 0;
+  const h = harness({now: () => now}), account = await h.add("DEMO0001"), run = h.manager.start(account.id);
+  assert.equal(run.leaseMs, 180000);
+  const keeper = new LeaseKeeper({now: () => now, notify: () => {}, schedule: () => 1, unschedule: () => {},
+    call: async (path, args) => path === "/runs/heartbeat" ? h.manager.heartbeat(args.id, args.runId) : h.manager.stop(args.id, args.runId)});
+  await keeper.start({id: account.id, runId: run.runId});
+  for (let n = 0; n < 90; n++) { now += 10000; await keeper.pulse(); assert.doesNotThrow(() => h.manager.validateRun(h.manager.get(account.id), run.runId)); }
+  await keeper.close();
+  assert.throws(() => h.manager.heartbeat(account.id, run.runId), cause => cause.code === "RUN_EXPIRED");
+});
+
+test("an expired or stopped run is never revived by a delayed heartbeat", async () => {
+  let now = 0;
+  const h = harness({now: () => now}), account = await h.add("DEMO0001"), run = h.manager.start(account.id);
+  now = 180001;
+  assert.throws(() => h.manager.heartbeat(account.id, run.runId), /最近 180 秒/);
+  const next = h.manager.start(account.id); h.manager.stop(account.id, next.runId);
+  assert.throws(() => h.manager.heartbeat(account.id, next.runId), cause => cause.code === "RUN_EXPIRED");
 });
 test("duplicate accounts are rejected even during concurrent creation", async () => {
   const h = harness();
@@ -142,7 +164,7 @@ test("HTTP helper requires pairing, restricts Origin/Host, and never launches Ch
     });
     assert.equal(badHostStatus, 403);
     const response = await fetch(url, {method: "POST", headers, body: "{}"});
-    assert.equal(response.status, 200); assert.equal((await response.json()).data.version, "0.4.2");
+    assert.equal(response.status, 200); assert.equal((await response.json()).data.version, "0.4.3");
     assert.equal(response.headers.get("access-control-allow-origin"), headers.Origin);
     assert.equal(launched, 0);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

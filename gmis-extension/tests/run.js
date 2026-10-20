@@ -5,3 +5,4 @@ import "./api.test.js";
 import "./categories.test.js";
 import "./helper.test.js";
 import "./multi-engine.test.js";
+import "./run-heartbeat.test.js";
