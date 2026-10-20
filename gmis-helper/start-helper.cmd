@@ -7,7 +7,8 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-if not exist "node_modules\playwright-core\package.json" (
+node --input-type=module -e "await import('playwright-core'); await import('tesseract.js')" >nul 2>nul
+if errorlevel 1 (
   call npm ci --ignore-scripts --registry=https://registry.npmjs.org
   if errorlevel 1 (
     pause

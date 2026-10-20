@@ -3,9 +3,10 @@ import {randomBytes, timingSafeEqual} from "node:crypto";
 import {pathToFileURL} from "node:url";
 import {AccountManager, fail} from "./manager.js";
 import {describeError} from "./operations.js";
+import {Tasks} from "./tasks.js";
 
 const HOST = "127.0.0.1", PORT = 8767;
-export function createServer(manager, token, {port = PORT} = {}) {
+export function createServer(manager, token, {port = PORT, tasks = new Tasks(manager)} = {}) {
   const server = http.createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -29,19 +30,22 @@ export function createServer(manager, token, {port = PORT} = {}) {
     try {
       if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] || "")) throw fail("需要 JSON 请求");
       let body = "";
-      for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 16384) throw fail("请求过大"); }
+      for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > (req.url === "/tasks/start" ? 65536 : 16384)) throw fail("请求过大"); }
       const args = JSON.parse(body || "{}");
       let result;
       switch (req.url) {
-        case "/health": result = {version: "0.4.3", build: "worker-heartbeat-20261020", accounts: manager.list()}; break;
+        case "/health": result = {version: "0.5.0", build: "persistent-tasks-20261020", accounts: manager.list(),tasks:tasks.list()}; break;
         case "/accounts/add": result = await manager.create(args); break;
-        case "/accounts/remove": result = await manager.remove(args.id); break;
+        case "/accounts/remove": if(tasks.jobs.get(args.id)?.active)throw fail("请先停止后台任务");result = await manager.remove(args.id);tasks.jobs.delete(args.id);break;
         case "/login/challenge": result = await manager.challenge(args.id, args.runId); break;
         case "/login/submit": result = await manager.login(args.id, args.code, args.runId, args.challengeId); break;
         case "/request": result = await manager.request(args.id, args); break;
         case "/runs/start": result = manager.start(args.id); break;
         case "/runs/heartbeat": result = manager.heartbeat(args.id, args.runId); break;
         case "/runs/stop": result = manager.stop(args.id, args.runId); break;
+        case "/tasks/start": result = tasks.start(args.id,args);break;
+        case "/tasks/status": result = tasks.status(args.id,args.jobId===tasks.jobs.get(args.id)?.jobId?args.after:0);break;
+        case "/tasks/stop": result = tasks.stop(args.id,args.jobId);break;
         default: return send(404, {error: "接口不存在"});
       }
       send(200, {ok: true, data: result});
@@ -66,13 +70,14 @@ async function main() {
     const phase = {running: "开始", done: "完成", error: "失败"}[event.phase];
     console.log(`${time} [${event.masked}] ${event.step}：${phase}${event.phase !== "running" ? `（${event.elapsed}ms）` : ""}${event.message ? " " + event.message : ""}`);
   }});
-  const server = createServer(manager, token);
+  const tasks=new Tasks(manager,{report:entry=>console.log(`${new Date(entry.at).toLocaleTimeString("zh-CN",{timeZone:"Asia/Shanghai",hour12:false})} [${entry.masked}] ${entry.message}`)});
+  const server = createServer(manager, token,{tasks});
   server.on("error", error => { console.error(error.code === "EADDRINUSE" ? "8767 端口已占用，请关闭旧后台后重启。" : "后台无法启动：" + error.code); process.exitCode = 1; });
   server.listen(PORT, HOST, () => {
-    console.log("\n北化报名助手多账号后台 0.4.3 · 后台续租修复版\n仅监听本机 http://127.0.0.1:8767\n");
-    console.log("配对码：" + token + "\n\n在扩展控制台粘贴配对码。账号密码仅保存在内存，关闭本窗口即清除。\n请保持此窗口和扩展控制台开启。Ctrl+C 退出。\n");
+    console.log("\n北化报名助手多账号后台 0.5.0 · 持续挂机版\n仅监听本机 http://127.0.0.1:8767\n");
+    console.log("配对码：" + token + "\n\n在扩展控制台粘贴配对码。账号密码仅保存在内存，关闭本窗口即清除。\n挂机任务由本窗口执行，控制台可关闭；电脑须保持开机且不休眠。Ctrl+C 停止全部并退出。\n");
   });
-  const shutdown = async () => { server.close(); await manager.close().catch(() => {}); process.exit(); };
+  const shutdown = async () => { server.close(); await tasks.close().catch(()=>{});await manager.close().catch(() => {}); process.exit(); };
   process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(() => { console.error("后台启动失败"); process.exitCode = 1; });

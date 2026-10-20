@@ -1,7 +1,6 @@
 import {HelperClient, HelperAPI, QueuedOCR} from "./helper-api.js";
 import {LocalOCR} from "./ocr.js";
-import {MultiEngine, projectKey, categoryLabel} from "./multi-engine.js";
-import {RunHeartbeat} from "./run-heartbeat.js";
+import {projectKey, categoryLabel} from "./multi-engine.js";
 import {matches, parseTime, countdown} from "./core.js";
 
 const $ = id => document.getElementById(id);
@@ -9,10 +8,10 @@ const preview = new URL(location.href).searchParams.has("preview");
 const accounts = new Map();
 let client, current, busy = false;
 const ocr = new QueuedOCR(new LocalOCR(message => log(null, message)));
-const labels = {starting: "正在启动", waiting: "等待开始", running: "正在尝试", success: "报名成功", error: "已停止", stopped: "已停止"};
-function log(account, message, error = false) {
+const labels = {starting: "后台正在启动", waiting: "等待开始", running: "正在尝试", success: "全部报名成功", error: "已停止", stopped: "已停止",stopping:"正在停止",exhausted:"尝试次数已用完"};
+function log(account, message, error = false, at = Date.now()) {
   const row = document.createElement("div"); row.className = "log" + (error ? " error" : "");
-  const time = document.createElement("time"); time.textContent = new Date().toLocaleTimeString("zh-CN", {hour12: false});
+  const time = document.createElement("time"); time.textContent = new Date(at).toLocaleTimeString("zh-CN", {timeZone:"Asia/Shanghai",hour12: false});
   const text = document.createElement("span"); text.textContent = (account ? `[${account.label} ${account.masked}] ` : "") + message;
   row.append(time, text); $("logs").append(row);
   while ($("logs").children.length > 500) $("logs").firstElementChild.remove();
@@ -21,6 +20,7 @@ function log(account, message, error = false) {
 function selected() { return [...accounts.values()].filter(a => a.checked); }
 function active() { return accounts.get(current); }
 function phase(account) {
+  if(account.connectionNotice)return account.connectionNotice;
   if (account.state?.phase === "waiting") return "距离尝试 " + countdown(account.state.attemptAt - Date.now());
   if (account.state?.phase === "running") return `尝试 ${account.state.attempt}/${account.state.maxAttempts}`;
   return labels[account.state?.phase] || account.notice || (account.ready ? "登录就绪" : "等待登录");
@@ -44,7 +44,7 @@ function render() {
   $("connection").textContent = client ? "本机后台已连接" : "后台未连接";
   for (const id of ["add", "load", "match-all", "start", "select-all"]) $(id).disabled = preview || !client || busy;
   for (const id of ["login", "remove"]) $(id).disabled = preview || !client || busy || !active() || !!active()?.job;
-  $("pair").disabled = preview || busy || [...accounts.values()].some(a => a.job);
+  $("pair").disabled = preview || busy;
   $("stop-all").disabled = preview || ![...accounts.values()].some(a => a.job);
   $("stop").disabled = preview || !active()?.job;
   $("current-title").textContent = active() ? active().label + "的项目" : "当前账号项目";
@@ -96,10 +96,11 @@ async function action(operation) {
 $("pair").onclick = () => action(async () => {
   const candidate = new HelperClient($("pair-token").value.trim());
   const health = await candidate.call("/health");
-  if (health.version !== "0.4.3") throw new Error("后台仍是旧版，请关闭旧后台并重新运行 start-helper.cmd，再复制新的配对码");
+  if (health.version !== "0.5.0") throw new Error("后台仍是旧版，请关闭旧后台并重新运行 start-helper.cmd，再复制新的配对码");
   client = candidate; accounts.clear(); current = undefined;
   health.accounts.forEach(remember); $("pair-token").value = "";
-  log(null, `后台 ${health.version} 已连接。账号会话彼此独立，可在此添加多个账号。`);
+  for(const task of health.tasks||[]){const account=accounts.get(task.accountId);if(account){applyTask(account,task);await refreshTask(account);}}
+  log(null, `后台 ${health.version} 已连接。任务由本机后台持续执行，关闭或重新打开控制台不影响挂机。`);
 });
 $("add").onclick = () => action(async () => {
   const added = await client.call("/accounts/add", {username: $("username").value.trim(), password: $("password").value, label: $("account-label").value.trim(), loginMode: $("login-mode").value});
@@ -151,61 +152,57 @@ function options() {
     ...($("attempt-at").value ? {attemptAt: parseTime($("attempt-at").value)} : {})};
 }
 async function runAccount(account, settings) {
-  const api = apiFor(account);
-  const targets = [...account.targets.values()].map(row => ({...row}));
-  const engine = new MultiEngine({apiFor: category => { const targetAPI = apiFor(account, category); targetAPI.runId = api.runId; return targetAPI; }, ocr,
-    log: message => log(account, message), state: state => { account.state = state; render(); },
-    journal: async entry => { account.lastTask = entry; }});
-  // Set job before any awaits to make duplicate starts impossible in this console.
-  const job = {api, engine, stopping: false}; account.job = job; account.state = {phase: "starting"};
-  const failHeartbeat = error => {
-    if (job.stopping || account.job !== job || job.heartbeatFailure) return;
-    job.heartbeatFailure = error; engine.stop();
-    log(account, "任务续租失败，已停止：" + error.message, true);
-    if (api.runId) void client.call("/runs/stop", api.args()).catch(() => {});
-  };
-  const heartbeat = new RunHeartbeat({onFailure: failHeartbeat, onNotice: notice =>
-    log(account, notice.type === "recovered" ? "任务续租已恢复。" : notice.message)});
-  job.heartbeat = heartbeat;
+  const targets = [...account.targets.values()].map(({id,category,mc}) => ({id,category,mc}));
+  const job = {requestId:crypto.randomUUID(),targets,settings,stopping:false};account.job=job;account.state={phase:"starting"};render();renderProjects();
   try {
-    api.runId = (await client.call("/runs/start", {id: account.id})).runId;
-    if (job.stopping) return;
-    await heartbeat.start({token: client.token, ...api.args()});
-    if (job.stopping) return;
-    if (job.heartbeatFailure) throw job.heartbeatFailure;
-    log(account, `任务已启动：${targets.length} 个项目；并发查询，同账号依次提交；重试间隔 ${settings.intervalSeconds} 秒。`);
-    await engine.run(targets, settings);
+    applyTask(account,await client.call("/tasks/start",{id:account.id,requestId:job.requestId,targets,settings}));
+    if(job.stopping&&account.job)await stop(account);
   } catch (error) {
-    if (error.code === "SESSION_EXPIRED") account.ready = false;
-    account.state = {phase: job.stopping ? "stopped" : "error"}; log(account, error.message, !job.stopping);
-  } finally {
-    heartbeat.close();
-    if (api.runId) await client.call("/runs/stop", api.args()).catch(error => log(account, error.message, true));
-    if (job.stopping) account.state = {phase: "stopped"};
-    account.job = null;
-    if (![...accounts.values()].some(a => a.job)) globalThis.chrome?.power?.releaseKeepAwake();
-    render(); renderProjects();
+    if(error.code&&error.code!=="HELPER_UNAVAILABLE"){account.job=null;account.state={phase:"error"};}
+    log(account,"启动回执未确认，将读取后台状态核对："+error.message,true);
   }
+  render();renderProjects();
+}
+function applyTask(account,task){
+  if(!task)return;
+  const changed=account.taskJobId!==task.jobId;
+  if(changed){account.taskJobId=task.jobId;account.taskCursor=0;account.targets=new Map(task.targets.map(row=>[projectKey(row),row]));}
+  for(const entry of task.logs||[])if(entry.seq>(account.taskCursor||0)){log(account,entry.message,entry.error,entry.at);account.taskCursor=entry.seq;}
+  account.state=task.state;account.connectionNotice=task.connectionNotice;
+  account.ready=task.accountReady;
+  account.job=task.active?{jobId:task.jobId,stopping:task.state.phase==="stopping"}:null;
+}
+async function refreshTask(account){
+  let task=await client.call("/tasks/status",{id:account.id,jobId:account.taskJobId,after:account.taskCursor||0});
+  const pending=account.job;
+  if(!task&&pending?.requestId&&!pending.stopping){task=await client.call("/tasks/start",{id:account.id,requestId:pending.requestId,targets:pending.targets,settings:pending.settings});}
+  applyTask(account,task);
+}
+let polling=false,pollWarning=false;
+async function pollTasks(){
+  if(!client||preview||polling||busy)return;
+  polling=true;
+  try{
+    await Promise.all([...accounts.values()].map(account=>refreshTask(account)));
+    if(pollWarning){log(null,"控制台与后台状态连接已恢复。");pollWarning=false;}
+    render();renderProjects();
+  }catch(error){if(!pollWarning){log(null,"暂时无法读取任务状态；已提交的后台任务继续运行，控制台会重试。"+error.message,true);pollWarning=true;}}
+  finally{polling=false;}
 }
 $("start").onclick = () => action(async () => {
   const targets = selected().filter(a => !a.job), settings = options();
   if (!targets.length) throw new Error("请勾选尚未运行的账号");
   if (targets.some(a => !a.ready || !a.targets.size)) throw new Error("每个勾选账号都需要先登录并选择项目");
-  for (const account of targets) {
-    for (const target of account.targets.values()) if (settings.attemptAt !== undefined && settings.attemptAt >= parseTime(target.bmjzsj)) throw new Error(account.label + "的开始尝试时间已超过项目截止时间：" + target.mc);
-  }
-  globalThis.chrome?.power?.requestKeepAwake("system");
   for (const account of targets) void runAccount(account, {...settings});
   log(null, `已启动 ${targets.length} 个账号，分别使用独立会话。`);
 });
 async function stop(account) {
   const job = account?.job; if (!job) return;
-  job.stopping = true; job.engine.stop(); job.heartbeat?.close();
-  if (job.api.runId) {
-    try { await client.call("/runs/stop", job.api.args()); }
-    catch (error) { log(account, "停止指令未送达后台：" + error.message + "；任务租约到期后禁止新提交。", true); }
-  }
-  log(account, "已请求停止；已发送到学校的请求仍需等待结果。"); render();
+  job.stopping=true;
+  if(!job.jobId){log(account,"任务正在接管，将在收到后台编号后停止。");return;}
+  try{applyTask(account,await client.call("/tasks/stop",{id:account.id,jobId:job.jobId}));log(account,"已请求停止；已发送到学校的请求仍需核验结果。");}
+  catch(error){log(account,"停止指令尚未送达，后台任务仍可能运行；请重试或关闭本机后台窗口。"+error.message,true);}
+  render();renderProjects();
 }
 $("stop").onclick = () => { void stop(active()); };
 $("stop-all").onclick = () => { accounts.forEach(a => { void stop(a); }); };
@@ -219,13 +216,8 @@ $("login-mode").onchange = () => {
   $("login-path").textContent = sso ? "统一身份认证 → i 北化 → 研究生系统 → 核验学号。" : "GMIS 独立登录 → 核验学号；仅用于该入口的独立密码。";
 };
 $("category").onchange = () => { renderProjects(); };
-window.addEventListener("beforeunload", () => {
-  for (const account of accounts.values()) if (account.job) {
-    account.job.engine.stop();
-    account.job.heartbeat?.close();
-    if (account.job.api.runId) void client.call("/runs/stop", account.job.api.args(), {keepalive: true}).catch(() => {});
-  }
-});
+// Closing this status console intentionally leaves helper-owned tasks running.
+setInterval(()=>{void pollTasks();},2000);
 setInterval(() => { if ([...accounts.values()].some(a => a.job)) render(); }, 1000);
 if (preview) {
   $("preview-banner").hidden = false;

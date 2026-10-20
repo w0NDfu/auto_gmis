@@ -97,7 +97,7 @@ export class AccountManager {
     void settled.finally(() => account.readers.delete(settled));
     return pending;
   }
-  active(account) { return account.run && account.run.expires > this.now(); }
+  active(account) { return account.run && (account.run.managed || account.run.expires > this.now()); }
   validateRun(account, runId) {
     if (account.run?.id !== runId || !runId) throw fail("任务已停止、被其他任务替换或后台已重启，请重新启动任务", "RUN_EXPIRED");
     if (!this.active(account)) {
@@ -105,11 +105,11 @@ export class AccountManager {
       throw fail(`任务续租超时：最近 ${gap} 秒未收到有效续租，请重新启动任务`, "RUN_EXPIRED");
     }
   }
-  start(id) {
+  start(id,{managed=false}={}) {
     const account = this.get(id);
     if (!account.ready) throw fail("请先登录账号");
     if (this.active(account)) throw fail("该账号已有任务在运行");
-    account.run = {id: randomUUID(), renewedAt: this.now(), expires: this.now() + this.leaseMs};
+    account.run = {id: randomUUID(), managed, renewedAt: this.now(), expires: this.now() + this.leaseMs};
     return {runId: account.run.id, leaseMs: this.leaseMs};
   }
   heartbeat(id, runId) {

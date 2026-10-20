@@ -10,6 +10,7 @@ import "./sso.test.js";
 import "./sso-form.test.js";
 import "./identity.test.js";
 import "./operations.test.js";
+import "./tasks.test.js";
 import {LeaseKeeper} from "../../gmis-extension/run-heartbeat.js";
 
 function harness(options) {
@@ -164,7 +165,7 @@ test("HTTP helper requires pairing, restricts Origin/Host, and never launches Ch
     });
     assert.equal(badHostStatus, 403);
     const response = await fetch(url, {method: "POST", headers, body: "{}"});
-    assert.equal(response.status, 200); assert.equal((await response.json()).data.version, "0.4.3");
+    assert.equal(response.status, 200); assert.equal((await response.json()).data.version, "0.5.0");
     assert.equal(response.headers.get("access-control-allow-origin"), headers.Origin);
     assert.equal(launched, 0);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
