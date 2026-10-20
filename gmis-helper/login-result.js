@@ -15,6 +15,9 @@ export function resultNotice(result) {
   return "";
 }
 export function loginFailure(notice = "") {
+  if (/短信|动态口令|一次性口令|二次认证|人脸验证|扫码确认|滑块|sms|one.?time.?password/i.test(notice)) {
+    return {code: "LOGIN_INTERACTIVE", message: `学校要求其他认证步骤：${notice}`};
+  }
   if (/验证码|校验码|verification\s*code|captcha/i.test(notice)) {
     return {code: "LOGIN_CAPTCHA", message: `学校拒绝验证码：${notice}`};
   }

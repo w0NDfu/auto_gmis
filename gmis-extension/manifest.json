@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "北化报名助手",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "在同一控制台管理多个账号：劳动实践与学术报告、独立会话自动登录、本地验证码识别、定时尝试和报名核验。",
   "minimum_chrome_version": "116",
   "permissions": ["power"],

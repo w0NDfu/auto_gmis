@@ -22,7 +22,15 @@ export class HelperAPI {
     Object.assign(this, {client, accountId, categoryKey, ocr, log, runId: undefined});
   }
   args(extra = {}) { return {id: this.accountId, runId: this.runId, ...extra}; }
-  async login() {
+  login() {
+    this.client.logins ||= new Map();
+    if (!this.client.logins.has(this.accountId)) {
+      const pending = this.performLogin().finally(() => this.client.logins.delete(this.accountId));
+      this.client.logins.set(this.accountId, pending);
+    }
+    return this.client.logins.get(this.accountId);
+  }
+  async performLogin() {
     // Warm up before fetching a short-lived captcha, especially on the first account.
     await this.ocr.prepare?.();
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -45,7 +53,9 @@ export class HelperAPI {
   async read(operation, data) {
     try { return await this.request(operation, data); }
     catch (error) {
+      // Do not re-login behind another target's pending captcha or submission.
       if (error.code !== "SESSION_EXPIRED") throw error;
+      if (this.runId) throw Object.assign(new Error("登录会话已失效，任务已停止，请重新登录后启动"), {code: "SESSION_EXPIRED"});
       await this.login(); return this.request(operation, data);
     }
   }

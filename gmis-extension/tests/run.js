@@ -4,3 +4,4 @@ import "./engine.test.js";
 import "./api.test.js";
 import "./categories.test.js";
 import "./helper.test.js";
+import "./multi-engine.test.js";

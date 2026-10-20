@@ -7,6 +7,7 @@ import {createServer} from "../server.js";
 import "./integration.js";
 import "./login.test.js";
 import "./sso.test.js";
+import "./sso-form.test.js";
 import "./identity.test.js";
 import "./operations.test.js";
 
@@ -49,6 +50,32 @@ test("same-account operations serialize while other accounts remain concurrent",
   await h.manager.serial(b.id, () => { seen.push("b1"); });
   assert.deepEqual(seen, ["a1", "b1"]); release(); await Promise.all([first, second]);
   assert.deepEqual(seen, ["a1", "b1", "a1done", "a2"]);
+});
+
+test("same-account lists use at most two readers; captcha/write operations wait for readers and block later reads", async () => {
+  const h = harness(), a = await h.add("DEMO0001");
+  const seen = []; let releaseReaders, releaseWriter, active = 0, peak = 0;
+  const readers = new Promise(r => { releaseReaders = r; }), writer = new Promise(r => { releaseWriter = r; });
+  const read = n => h.manager.read(a.id, async () => { active++; peak = Math.max(peak, active); seen.push(n); await readers; active--; });
+  const first = read("read1"), second = read("read2");
+  const exclusive = h.manager.serial(a.id, async () => { assert.equal(active, 0); seen.push("write"); await writer; });
+  const third = read("read3");
+  await new Promise(setImmediate); assert.deepEqual(seen, ["read1", "read2"]);
+  releaseReaders(); await new Promise(setImmediate);
+  assert.deepEqual(seen, ["read1", "read2", "write"]);
+  releaseWriter(); await Promise.all([first, second, exclusive, third]);
+  assert.deepEqual(seen, ["read1", "read2", "write", "read3"]); assert.equal(peak, 2);
+});
+
+test("both real list routes overlap while same-account submits remain exclusive", async () => {
+  const h = harness(), a = await h.add("DEMO0001"), {runId} = h.manager.start(a.id);
+  let release, active = 0, peak = 0;
+  const barrier = new Promise(r => { release = r; });
+  const fetch = h.contexts[0].request.fetch;
+  h.contexts[0].request.fetch = async (...args) => { active++; peak = Math.max(peak, active); await barrier; const result = await fetch(...args); active--; return result; };
+  const queries = ["labour", "academic"].map(category => h.manager.request(a.id, {category, operation:"available", runId}));
+  await new Promise(setImmediate); assert.equal(peak, 2); release(); await Promise.all(queries);
+  assert.equal(h.requests.length, 2);
 });
 test("stop immediately invalidates a queued submit without waiting for the queue", async () => {
   const h = harness(), a = await h.add("DEMO0001"), {runId} = h.manager.start(a.id);
@@ -115,7 +142,7 @@ test("HTTP helper requires pairing, restricts Origin/Host, and never launches Ch
     });
     assert.equal(badHostStatus, 403);
     const response = await fetch(url, {method: "POST", headers, body: "{}"});
-    assert.equal(response.status, 200); assert.equal((await response.json()).data.version, "0.4.1");
+    assert.equal(response.status, 200); assert.equal((await response.json()).data.version, "0.4.2");
     assert.equal(response.headers.get("access-control-allow-origin"), headers.Origin);
     assert.equal(launched, 0);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

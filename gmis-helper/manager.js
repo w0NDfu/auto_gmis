@@ -74,11 +74,27 @@ export class AccountManager {
   }
   serial(id, operation) {
     const account = this.get(id);
-    const pending = account.queue.then(() => {
+    const readers = [...(account.readers || [])];
+    const barrier = readers.length ? Promise.all([account.queue, ...readers]) : account.queue;
+    const pending = barrier.then(() => {
       if (this.accounts.get(id) !== account) throw fail("账号已移除");
       return operation(account);
     });
     account.queue = pending.catch(() => {});
+    return pending;
+  }
+  read(id, operation) {
+    const account = this.get(id);
+    account.readers ||= new Set();
+    // Bounded shared reads. Writers reserve queue immediately and wait for earlier reads.
+    if (account.readers.size >= 2) return this.serial(id, operation);
+    const pending = account.queue.then(() => {
+      if (this.accounts.get(id) !== account) throw fail("账号已移除");
+      return operation(account);
+    });
+    const settled = pending.catch(() => {});
+    account.readers.add(settled);
+    void settled.finally(() => account.readers.delete(settled));
     return pending;
   }
   active(account) { return account.run && account.run.expires > this.now(); }
@@ -193,7 +209,8 @@ export class AccountManager {
       return this.public(account);
   }
   request(id, {category, operation, data = {}, runId}) {
-    return this.serial(id, async account => {
+    const execute = ["available", "enrolled"].includes(operation) ? this.read : this.serial;
+    return execute.call(this, id, async account => {
       const config = Object.hasOwn(CATEGORIES, category) && CATEGORIES[category];
       if (!config || !["available", "enrolled", "captcha", "preflight", "submit"].includes(operation)) throw fail("不支持的请求");
       if (!account.ready) throw fail("SESSION_EXPIRED", "SESSION_EXPIRED");

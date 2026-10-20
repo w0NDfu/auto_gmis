@@ -1,6 +1,6 @@
 import {HelperClient, HelperAPI, QueuedOCR} from "./helper-api.js";
 import {LocalOCR} from "./ocr.js";
-import {Engine} from "./engine.js";
+import {MultiEngine, projectKey, categoryLabel} from "./multi-engine.js";
 import {matches, parseTime, countdown} from "./core.js";
 
 const $ = id => document.getElementById(id);
@@ -35,7 +35,7 @@ function render() {
     check.onchange = () => { account.checked = check.checked; };
     const button = document.createElement("button"); button.type = "button";
     const title = document.createElement("strong"); title.textContent = account.label + " · " + account.masked;
-    const target = document.createElement("small"); target.textContent = (account.loginMode === "direct" ? "独立登录 · " : "统一认证 · ") + (account.target?.mc || "尚未选择项目");
+    const target = document.createElement("small"); target.textContent = (account.loginMode === "direct" ? "独立登录 · " : "统一认证 · ") + `已选 ${account.targets.size} 个项目`;
     const state = document.createElement("small"); state.className = "phase " + (account.state?.phase || ""); state.textContent = phase(account);
     button.append(title, target, state); button.onclick = () => { current = account.id; render(); renderProjects(); };
     item.append(check, button); $("accounts").append(item);
@@ -50,28 +50,42 @@ function render() {
   $("current-status").textContent = active() ? phase(active()) : "添加账号并登录后，输入关键词匹配项目。";
 }
 function renderProjects() {
-  const account = active(), list = (account?.rows || []).filter(row => !$("keyword").value.trim() || matches(row.mc, $("keyword").value));
+  const account = active(), list = (account?.rows || []).filter(row =>
+    ($("category").value === "all" || row.category === $("category").value) &&
+    (!$("keyword").value.trim() || matches(row.mc, $("keyword").value)));
+  $("selected-count").textContent = account?.targets.size || 0;
+  $("selected-projects").replaceChildren();
+  $("clear-projects").disabled = !account?.targets.size || !!account?.job || busy;
+  for (const [key, row] of account?.targets || []) {
+    const button = document.createElement("button"); button.className = "selection-chip";
+    button.textContent = `${categoryLabel(row.category)} · ${row.mc} ×`;
+    button.setAttribute("aria-label", "取消选择 " + row.mc); button.disabled = busy || !!account.job;
+    button.onclick = () => { account.targets.delete(key); render(); renderProjects(); };
+    $("selected-projects").append(button);
+  }
   $("projects").replaceChildren(); $("project-count").textContent = list.length;
-  if (!list.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "还没有匹配项目，连接账号后获取列表。"; $("projects").append(empty); }
+  if (!list.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = account?.rows.length ? "当前筛选没有匹配项目，已有选择保留。" : "还没有项目，连接账号后获取列表。"; $("projects").append(empty); }
   for (const row of list) {
-    const button = document.createElement("button"); button.className = "project" + (String(account.target?.id) === String(row.id) ? " selected" : "");
+    const checked = account.targets.has(projectKey(row));
+    const button = document.createElement("button"); button.className = "project" + (checked ? " selected" : "");
+    button.setAttribute("role", "checkbox"); button.setAttribute("aria-checked", String(checked));
     button.disabled = busy || !!account.job;
     const radio = document.createElement("span"); radio.className = "radio";
     const content = document.createElement("div"); content.className = "project-content";
-    const title = document.createElement("h3"); title.textContent = row.mc;
+    const title = document.createElement("h3"); title.textContent = `【${categoryLabel(row.category)}】${row.mc}`;
     const meta = document.createElement("p"); meta.textContent = `报名：${row.bmkssj} 至 ${row.bmjzsj}`;
     const info = document.createElement("p"); info.textContent = `${row.dd || "地点待公布"} · 已报名 ${row.bmrs ?? "—"} / ${row.rs ?? "—"}`;
     content.append(title, meta, info); button.append(radio, content);
-    button.onclick = () => { account.target = row; account.targetCategory = account.rowsCategory; render(); renderProjects(); };
+    button.onclick = () => { const key = projectKey(row); if (account.targets.has(key)) account.targets.delete(key); else account.targets.set(key, {...row}); render(); renderProjects(); };
     $("projects").append(button);
   }
 }
 function remember(publicAccount) {
   const old = accounts.get(publicAccount.id);
-  const record = old || {checked: true, rows: [], target: null, state: null};
+  const record = old || {checked: true, rows: [], targets: new Map(), state: null};
   Object.assign(record, publicAccount); accounts.set(record.id, record); current ||= record.id; return record;
 }
-function apiFor(account, category = $("category").value) { return new HelperAPI(client, account.id, category, ocr, message => log(account, message)); }
+function apiFor(account, category = "labour") { return new HelperAPI(client, account.id, category, ocr, message => log(account, message)); }
 async function action(operation) {
   if (busy) return;
   busy = true; render(); renderProjects();
@@ -81,7 +95,7 @@ async function action(operation) {
 $("pair").onclick = () => action(async () => {
   const candidate = new HelperClient($("pair-token").value.trim());
   const health = await candidate.call("/health");
-  if (health.version !== "0.4.1") throw new Error("后台仍是旧版，请关闭旧后台并重新运行 start-helper.cmd，再复制新的配对码");
+  if (health.version !== "0.4.2") throw new Error("后台仍是旧版，请关闭旧后台并重新运行 start-helper.cmd，再复制新的配对码");
   client = candidate; accounts.clear(); current = undefined;
   health.accounts.forEach(remember); $("pair-token").value = "";
   log(null, `后台 ${health.version} 已连接。账号会话彼此独立，可在此添加多个账号。`);
@@ -104,8 +118,11 @@ $("remove").onclick = () => action(async () => {
 $("select-all").onclick = () => { const value = ![...accounts.values()].every(a => a.checked); accounts.forEach(a => { a.checked = value; }); render(); };
 async function load(account, category) {
   if (account.job) throw new Error("请先停止该账号任务，再更换项目");
-  account.rows = await apiFor(account, category).available(); account.rowsCategory = category;
-  if (account.targetCategory !== category || !account.rows.some(r => String(r.id) === String(account.target?.id))) account.target = null;
+  const categories = category === "all" ? ["labour", "academic"] : [category];
+  // Both lists are read-only. Preserve selections even when filters/categories change.
+  const results = await Promise.all(categories.map(async key => (await apiFor(account, key).available()).map(row => ({...row, category: key}))));
+  account.rows = account.rows.filter(row => !categories.includes(row.category)).concat(results.flat());
+  for (const row of results.flat()) if (account.targets.has(projectKey(row))) account.targets.set(projectKey(row), {...row});
 }
 $("load").onclick = () => action(async () => {
   if (!active()) throw new Error("请先添加账号");
@@ -117,11 +134,10 @@ $("match-all").onclick = () => action(async () => {
   await Promise.all(targets.map(async account => {
     try {
       await load(account, category);
-      const found = account.rows.filter(row => matches(row.mc, keyword));
-      account.target = null;
-      if (found.length !== 1) throw new Error(`匹配 ${found.length} 个项目，请点击账号后手动选择一个项目`);
-      account.target = found[0]; account.targetCategory = category;
-      log(account, "已匹配：" + account.target.mc);
+      const found = account.rows.filter(row => (category === "all" || row.category === category) && matches(row.mc, keyword));
+      if (found.length !== 1) throw new Error(`匹配 ${found.length} 个项目，请点击账号后勾选需要的项目；已有选择保留`);
+      account.targets.set(projectKey(found[0]), {...found[0]});
+      log(account, "已加入选择：" + found[0].mc);
     } catch (error) { log(account, error.message, true); }
   }));
 });
@@ -134,8 +150,10 @@ function options() {
     ...($("attempt-at").value ? {attemptAt: parseTime($("attempt-at").value)} : {})};
 }
 async function runAccount(account, settings) {
-  const api = apiFor(account, account.targetCategory);
-  const engine = new Engine({api, ocr, log: message => log(account, message), state: state => { account.state = state; render(); },
+  const api = apiFor(account);
+  const targets = [...account.targets.values()].map(row => ({...row}));
+  const engine = new MultiEngine({apiFor: category => { const targetAPI = apiFor(account, category); targetAPI.runId = api.runId; return targetAPI; }, ocr,
+    log: message => log(account, message), state: state => { account.state = state; render(); },
     journal: async entry => { account.lastTask = entry; }});
   // Set job before any awaits to make duplicate starts impossible in this console.
   const job = {api, engine, stopping: false}; account.job = job; account.state = {phase: "starting"};
@@ -151,9 +169,10 @@ async function runAccount(account, settings) {
       catch (error) { engine.stop(); log(account, "后台连接中断，任务已停止：" + error.message, true); }
       finally { heartbeating = false; }
     }, 10000);
-    log(account, `任务已启动：${account.target.mc}；重试间隔 ${settings.intervalSeconds} 秒。`);
-    await engine.run({...account.target}, settings);
+    log(account, `任务已启动：${targets.length} 个项目；并发查询，同账号依次提交；重试间隔 ${settings.intervalSeconds} 秒。`);
+    await engine.run(targets, settings);
   } catch (error) {
+    if (error.code === "SESSION_EXPIRED") account.ready = false;
     account.state = {phase: job.stopping ? "stopped" : "error"}; log(account, error.message, !job.stopping);
   } finally {
     clearInterval(heartbeat);
@@ -167,9 +186,9 @@ async function runAccount(account, settings) {
 $("start").onclick = () => action(async () => {
   const targets = selected().filter(a => !a.job), settings = options();
   if (!targets.length) throw new Error("请勾选尚未运行的账号");
-  if (targets.some(a => !a.ready || !a.target)) throw new Error("每个勾选账号都需要先登录并选择项目");
+  if (targets.some(a => !a.ready || !a.targets.size)) throw new Error("每个勾选账号都需要先登录并选择项目");
   for (const account of targets) {
-    if (settings.attemptAt !== undefined && settings.attemptAt >= parseTime(account.target.bmjzsj)) throw new Error(account.label + "的开始尝试时间已超过截止时间");
+    for (const target of account.targets.values()) if (settings.attemptAt !== undefined && settings.attemptAt >= parseTime(target.bmjzsj)) throw new Error(account.label + "的开始尝试时间已超过项目截止时间：" + target.mc);
   }
   globalThis.chrome?.power?.requestKeepAwake("system");
   for (const account of targets) void runAccount(account, {...settings});
@@ -187,6 +206,7 @@ async function stop(account) {
 $("stop").onclick = () => { void stop(active()); };
 $("stop-all").onclick = () => { accounts.forEach(a => { void stop(a); }); };
 $("keyword").oninput = renderProjects;
+$("clear-projects").onclick = () => { if (active() && !active().job && !busy) { active().targets.clear(); render(); renderProjects(); } };
 $("login-mode").onchange = () => {
   const sso = $("login-mode").value === "sso";
   $("password-label").textContent = sso ? "统一身份认证密码" : "GMIS 独立登录密码";
@@ -207,10 +227,11 @@ if (preview) {
   const row = {id: 101, mc: "前沿科学学术报告：从材料创新到绿色未来", bmkssj: "2026-10-18 14:00:00", bmjzsj: "2026-10-18 15:00:00", dd: "学术报告厅", rs: 120, bmrs: 32};
   for (const [index, name] of ["账号 A", "账号 B", "账号 C"].entries()) {
     const account = remember({id: "demo-" + index, label: name, masked: "DE••••0" + index, ready: true});
-    account.rows = [{...row}]; account.target = {...row}; account.rowsCategory = "academic"; account.targetCategory = "academic";
+    account.rows = [{...row, category: "academic"}, {...row, id: 101, category: "labour", mc: "玉兰苑校园志愿服务", dd: "玉兰苑集合点"}];
+    account.rows.forEach(row => account.targets.set(projectKey(row), {...row}));
     account.notice = index === 2 ? "等待匹配" : "项目已就绪";
   }
-  $("category").value = "academic"; $("keyword").value = "学术报告";
+  $("category").value = "all";
   log(null, "多账号界面预览：同一控制台管理多个独立会话。");
   log(accounts.get("demo-0"), "已匹配学术报告；开始尝试时间默认提前 1 分钟。");
 }

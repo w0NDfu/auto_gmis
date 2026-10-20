@@ -14,9 +14,9 @@ export class SSOLogin {
   constructor({now = Date.now, sleep = pause, inspect = inspectSSOForm} = {}) { Object.assign(this, {now, sleep, inspect}); }
   async read(page) { return page.evaluate(this.inspect); }
   input(page, index, selector) { return selector ? page.locator(selector) : page.locator("input").nth(index); }
-  async form(page) {
-    const until = this.now() + 20000;
-    let switched = false, lastForm = {};
+  async form(page, {timeout = 20000} = {}) {
+    const until = this.now() + timeout;
+    let switchCount = 0, lastSwitch = -Infinity, lastForm = {}, stableKey = "", stableSince = 0;
     while (this.now() < until) {
       let form;
       try { form = await this.read(page); }
@@ -25,20 +25,38 @@ export class SSOLogin {
         await this.sleep(200); continue;
       }
       lastForm = form;
-      if (form.password !== undefined && form.username !== undefined && form.submit >= 0) return form;
-      if (!switched) {
-        const names = /^(用户名密码|账号密码|账号密码登录|用户名密码登录|密码登录|账号登录)$/;
+      if (form.interactiveChallenge) throw error("统一认证要求滑块、短信或其他二次认证，请在学校页面完成后重试", "LOGIN_INTERACTIVE");
+      const ready = form.password !== undefined && form.username !== undefined && form.submit >= 0;
+      if (ready) {
+        // Initial component hydration can briefly show password controls, then restore QR mode.
+        const key = JSON.stringify([form.usernameSelector ?? form.username, form.passwordSelector ?? form.password,
+          form.submitSelector ?? form.submit, form.captchaSelector ?? form.captcha, form.captchaImage, form.selectedTab]);
+        if (key !== stableKey) { stableKey = key; stableSince = this.now(); }
+        if (this.now() - stableSince >= 400) return form;
+        await this.sleep(200); continue;
+      }
+      stableKey = "";
+      const passwordTabSelected = /^(用户名\s*密码|账号\s*密码(?:登录)?|用户名\s*密码登录|密码登录|账号登录)$/.test(form.selectedTab || "");
+      if (!passwordTabSelected && switchCount < 8 && this.now() - lastSwitch >= 1200) {
+        const names = /^(用户名\s*密码|账号\s*密码(?:登录)?|用户名\s*密码登录|密码登录|账号登录)$/;
         // This school's default is enterprise-WeChat QR; the actual password tab is 用户名密码.
-        const tab = page.getByRole("tab", {name: names}).first();
-        if (await tab.isVisible()) { await tab.click(); switched = true; continue; }
-        const mode = page.getByText(names).first();
-        if (await mode.isVisible()) { await mode.click(); switched = true; continue; }
+        const tab = form.passwordTabSelector ? page.locator(form.passwordTabSelector) :
+          page.getByRole("tab", {name: names}).filter({visible: true}).first();
+        if (await tab.isVisible()) {
+          await tab.click({timeout: 2000}); switchCount++; lastSwitch = this.now();
+          await this.sleep(200); continue;
+        }
+        const mode = page.getByText(names).filter({visible: true}).first();
+        if (await mode.isVisible()) {
+          await mode.click({timeout: 2000}); switchCount++; lastSwitch = this.now();
+          await this.sleep(200); continue;
+        }
       }
       await this.sleep(200);
     }
     const missing = [lastForm.username === undefined && "用户名输入框", lastForm.password === undefined && "密码输入框",
       !(lastForm.submit >= 0) && "登录按钮"].filter(Boolean).join("、");
-    throw error(`统一认证表单未就绪，缺少：${missing}${lastForm.selectedTab ? `；当前标签：${lastForm.selectedTab}` : ""}`, "SSO_FORM_NOT_FOUND");
+    throw error(`统一认证表单未就绪，缺少：${missing}${lastForm.selectedTab ? `；当前标签：${lastForm.selectedTab}` : ""}；已尝试切换密码登录 ${switchCount} 次${lastForm.visibleTabs ? `；可见方式：${lastForm.visibleTabs.join("、") || "无"}` : ""}`, "SSO_FORM_NOT_FOUND");
   }
   async snapshot(page, index) {
     return page.locator("img,canvas").nth(index).evaluate(el => {
@@ -51,23 +69,48 @@ export class SSOLogin {
   async challenge(account) {
     const page = account.page;
     account.ready = false; account.challenge = null;
-    if (!account.ssoRetry || new URL(page.url()).origin !== SSO_ORIGIN) {
+    const retrying = !!account.ssoRetry && new URL(page.url()).origin === SSO_ORIGIN;
+    if (!retrying) {
       await runStep(account, "准备独立认证会话", () => account.context.clearCookies());
       await runStep(account, "打开统一认证页面", () => page.goto(SSO_LOGIN, {waitUntil: "commit", timeout: 30000}));
     }
     account.ssoRetry = false;
     if (new URL(page.url()).origin !== SSO_ORIGIN) throw error("统一认证登录页跳转异常，请重新登录", "SSO_PAGE_CHANGED");
-    const form = await runStep(account, "识别用户名密码登录表单", () => this.form(page));
+    let form = await runStep(account, "识别用户名密码登录表单", async () => {
+      try { return await this.form(page, {timeout: retrying ? 6000 : 20000}); }
+      catch (cause) {
+        if (!retrying || cause.code !== "SSO_FORM_NOT_FOUND") throw cause;
+        // One fresh flow, preserving cookies and the school's captcha/security requirements.
+        await runStep(account, "恢复用户名密码登录入口（保留会话）", () => page.goto(SSO_LOGIN, {waitUntil: "commit", timeout: 30000}));
+        if (new URL(page.url()).origin !== SSO_ORIGIN) throw error("恢复认证入口后页面地址变化，请重新登录", "SSO_PAGE_CHANGED");
+        return this.form(page);
+      }
+    });
     let image = null;
     if (form.captcha !== undefined) {
-      if (form.captchaImage < 0 || /短信|手机|动态/.test(form.captchaHint)) {
+      if (/短信|手机|动态/.test(form.captchaHint)) {
         throw error("统一认证当前要求短信、滑块或其他二次验证，无法按普通图形验证码自动登录", "LOGIN_INTERACTIVE");
       }
-      image = await runStep(account, "读取统一认证验证码", () => this.snapshot(page, form.captchaImage));
+      image = await runStep(account, "读取统一认证验证码", () => this.waitForImage(page));
+      form = await this.read(page);
     }
     const challengeId = randomUUID();
     account.challenge = {id: challengeId, form, image, expires: this.now() + 60000, type: "sso"};
+    account.ssoRetry = true;
     return {challengeId, image, loginMode: "sso", requiresCaptcha: !!image};
+  }
+  async waitForImage(page) {
+    const until = this.now() + 10000;
+    while (this.now() < until) {
+      const form = await this.read(page);
+      if (form.interactiveChallenge) throw error("统一认证要求其他二次认证，请在学校页面完成后重试", "LOGIN_INTERACTIVE");
+      if (form.captcha !== undefined && form.captchaImage >= 0) {
+        try { return await this.snapshot(page, form.captchaImage); }
+        catch (cause) { if (!/验证码未加载/.test(cause.message)) throw cause; }
+      }
+      await this.sleep(200);
+    }
+    throw error("统一认证图形验证码图片 10 秒内未加载，请重试", "SSO_CAPTCHA_NOT_READY");
   }
   async submit(account, code, challengeId) {
     const page = account.page, challenge = account.challenge;
@@ -123,14 +166,22 @@ export class SSOLogin {
       if (url.origin !== SSO_ORIGIN) throw error("统一认证跳转到未预期的地址，已停止", "SSO_PAGE_CHANGED");
       let form;
       try { form = await this.read(page); } catch { await this.sleep(200); continue; }
+      if (form.interactiveChallenge) throw error("统一认证要求滑块、短信或二次验证，自动登录未完成", "LOGIN_INTERACTIVE");
       const renderedNotice = form.notice === baselineNotice && this.now() - started < 1000 ? "" : form.notice;
       const notice = safeNotice(account.loginNotice || renderedNotice, [account.username, account.password, account.loginCode]);
+      if (/短信/.test(form.selectedTab || "") && form.passwordTabSelector && form.password === undefined &&
+        (!notice || /短信|验证码|校验码/.test(notice))) {
+        account.ssoRetry = true;
+        throw error("认证页面切换到短信登录，将恢复用户名密码方式后重试", "LOGIN_CAPTCHA");
+      }
       if (notice && !/(?:登录|验证)成功|^success$/i.test(notice)) {
         const failure = loginFailure(notice);
         if (failure.code === "LOGIN_CAPTCHA") account.ssoRetry = true;
         throw error(failure.message, failure.code);
       }
-      if (form.interactive && form.captcha === undefined) throw error("统一认证要求滑块、短信或二次验证，自动登录未完成", "LOGIN_INTERACTIVE");
+      if (form.interactive && form.captcha === undefined) {
+        throw error("统一认证要求滑块、短信或二次验证，自动登录未完成", "LOGIN_INTERACTIVE");
+      }
       if (form.captcha !== undefined && !account.loginCode) {
         account.ssoRetry = true;
         throw error("统一认证要求图形验证码，正在获取验证码", "LOGIN_CAPTCHA");

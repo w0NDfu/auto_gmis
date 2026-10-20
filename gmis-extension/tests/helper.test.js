@@ -2,6 +2,24 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import {HelperClient, HelperAPI, QueuedOCR} from "../helper-api.js";
 
+test("parallel categories share one re-login rather than replacing each other's login challenge", async () => {
+  let challenges = 0, submits = 0;
+  const client = {call: async path => {
+    if (path === "/login/challenge") { challenges++; return {requiresCaptcha:false, challengeId:"c"}; }
+    submits++; return {ready:true};
+  }};
+  const a = new HelperAPI(client, "a", "labour", {}), b = new HelperAPI(client, "a", "academic", {});
+  await Promise.all([a.login(), b.login()]);
+  assert.equal(challenges, 1); assert.equal(submits, 1);
+});
+test("an expired running session cannot re-login behind another target's captcha", async () => {
+  const paths = [];
+  const api = new HelperAPI({call: async path => { paths.push(path); throw Object.assign(new Error("expired"), {code:"SESSION_EXPIRED"}); }}, "a", "labour");
+  api.runId = "running";
+  await assert.rejects(api.available(), error => error.code === "SESSION_EXPIRED");
+  assert.deepEqual(paths, ["/request"]);
+});
+
 test("helper adapter carries the account/run binding on every request", async () => {
   const calls = [], client = {call: async (path, args) => { calls.push({path, args}); return {rows: []}; }};
   const a = new HelperAPI(client, "account-a", "labour"), b = new HelperAPI(client, "account-b", "academic");

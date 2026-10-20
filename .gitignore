@@ -16,3 +16,9 @@ credentials*.json
 auth-state*.json
 playwright-report/
 test-results/
+
+# Versioned distribution archives
+!/gmis-extension.zip
+!/gmis-helper.zip
+# Local diagnostics and public-site research cache
+*.tmp

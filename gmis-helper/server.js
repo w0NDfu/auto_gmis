@@ -33,7 +33,7 @@ export function createServer(manager, token, {port = PORT} = {}) {
       const args = JSON.parse(body || "{}");
       let result;
       switch (req.url) {
-        case "/health": result = {version: "0.4.1", build: "login-steps-20261017", accounts: manager.list()}; break;
+        case "/health": result = {version: "0.4.2", build: "sso-sms-recovery-20261020", accounts: manager.list()}; break;
         case "/accounts/add": result = await manager.create(args); break;
         case "/accounts/remove": result = await manager.remove(args.id); break;
         case "/login/challenge": result = await manager.challenge(args.id, args.runId); break;
@@ -69,7 +69,7 @@ async function main() {
   const server = createServer(manager, token);
   server.on("error", error => { console.error(error.code === "EADDRINUSE" ? "8767 端口已占用，请关闭旧后台后重启。" : "后台无法启动：" + error.code); process.exitCode = 1; });
   server.listen(PORT, HOST, () => {
-    console.log("\n北化报名助手多账号后台 0.4.1 · 登录分步诊断版\n仅监听本机 http://127.0.0.1:8767\n");
+    console.log("\n北化报名助手多账号后台 0.4.2 · 短信标签恢复修复版\n仅监听本机 http://127.0.0.1:8767\n");
     console.log("配对码：" + token + "\n\n在扩展控制台粘贴配对码。账号密码仅保存在内存，关闭本窗口即清除。\n请保持此窗口和扩展控制台开启。Ctrl+C 退出。\n");
   });
   const shutdown = async () => { server.close(); await manager.close().catch(() => {}); process.exit(); };
