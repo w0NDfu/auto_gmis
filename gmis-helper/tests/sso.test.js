@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {SSOLogin, SSO_LOGIN, SSO_ORIGIN, PORTAL_ORIGIN, GMIS_SSO} from "../sso.js";
 import {AccountManager} from "../manager.js";
 import {loginFailure} from "../login-result.js";
+import {HelperAPI} from "../../gmis-extension/helper-api.js";
 
 const choice = control => ({filter() { return this; }, first: () => control});
 
@@ -167,14 +168,67 @@ test("password mode recovery uses the visible tab binding from the DOM", async (
   assert.equal((await h.sso.form(h.account.page)).password,1); assert.equal(switches,1);
 });
 
-test("captcha retry with a missing password entry recovers one fresh flow without clearing cookies", async () => {
+test("captcha retry with hidden password fields keeps the challenge instead of reopening login", async () => {
   const h = harness({captcha:true}); await h.sso.challenge(h.account);
   Object.assign(h.form,{username:undefined,password:undefined,selectedTab:"短信验证码"});
   const goto = h.account.page.goto;
   h.account.page.goto = async url => { await goto(url); Object.assign(h.form,{username:0,password:1,selectedTab:"用户名密码"}); };
   const challenge = await h.sso.challenge(h.account);
   assert.equal(challenge.requiresCaptcha,true); assert.equal(h.clears(),1);
-  assert.deepEqual(h.visits,[SSO_LOGIN,SSO_LOGIN]);
+  assert.equal(challenge.challengeMode,"captcha-only");
+  assert.deepEqual(h.visits,[SSO_LOGIN]);
+});
+
+test("a newly required captcha survives hidden credential fields and is actually filled on the next submit",async()=>{
+  const h=harness();const first=await h.sso.challenge(h.account);
+  const originalLocator=h.account.page.locator;let submitted=0;
+  h.account.page.locator=selector=>selector==="input"||selector==="img,canvas"?originalLocator(selector):({nth:()=>({click:async()=>{
+    submitted++;
+    if(submitted===1)Object.assign(h.form,{username:undefined,password:undefined,captcha:2,captchaImage:0});
+    else h.setURL(PORTAL_ORIGIN);
+  }})});
+  await assert.rejects(h.sso.submit(h.account,"",first.challengeId),cause=>cause.code==="LOGIN_CAPTCHA");
+  assert.equal(h.account.ssoCaptchaRequired,true);
+  const next=await h.sso.challenge(h.account);
+  assert.equal(next.requiresCaptcha,true);assert.equal(next.challengeMode,"captcha-only");
+  await h.sso.submit(h.account,"1234",next.challengeId);
+  assert.deepEqual(h.fills.map(fill=>fill.value),["DEMO0001","mock-secret","1234"]);
+  assert.equal(submitted,2);assert.equal(h.clears(),1);
+  assert.deepEqual(h.visits,[SSO_LOGIN,GMIS_SSO]);
+  assert.equal(h.account.ssoCaptchaRequired,false);
+});
+
+test("a required captcha that has not rendered yet is awaited without switching tabs or resetting the flow",async()=>{
+  const h=harness();h.account.ssoRetry=true;h.account.ssoCaptchaRequired=true;h.setURL(SSO_LOGIN);
+  Object.assign(h.form,{username:undefined,password:undefined,submit:0});let reads=0;
+  h.account.page.evaluate=async()=>{if(++reads===5)Object.assign(h.form,{captcha:2,captchaImage:0});return {...h.form};};
+  h.account.page.goto=async()=>{throw new Error("must preserve pending challenge");};
+  h.account.page.getByRole=()=>{throw new Error("must not switch away from pending challenge");};
+  assert.equal((await h.sso.challenge(h.account)).requiresCaptcha,true);assert.equal(h.clears(),0);
+});
+
+test("a missing required captcha fails precisely instead of re-submitting without a code",async()=>{
+  const h=harness();h.account.ssoRetry=true;h.account.ssoCaptchaRequired=true;h.setURL(SSO_LOGIN);
+  Object.assign(h.form,{username:undefined,password:undefined});
+  await assert.rejects(h.sso.challenge(h.account),cause=>cause.code==="SSO_CAPTCHA_NOT_READY"&&/未重新打开/.test(cause.message));
+  assert.equal(h.clicks(),0);assert.equal(h.fills.length,0);assert.equal(h.visits.length,0);
+});
+
+test("the real login adapter's retry reads and fills a newly required image before its second submission",async()=>{
+  const h=harness(),original=h.account.page.locator;let submits=0,recognitions=0;
+  h.account.page.locator=selector=>selector==="input"||selector==="img,canvas"?original(selector):({nth:()=>({click:async()=>{
+    if(++submits===1)Object.assign(h.form,{username:undefined,password:undefined,captcha:2,captchaImage:0});else h.setURL(PORTAL_ORIGIN);
+  }})});
+  const client={call:async(path,args)=>{
+    if(path==="/login/challenge")return h.sso.challenge(h.account);
+    if(path==="/login/submit"){await h.sso.submit(h.account,args.code,args.challengeId);return {ready:true};}
+    throw new Error("unexpected route");
+  }};
+  const api=new HelperAPI(client,"test-account","labour",{prepare:async()=>{},recognize:async image=>{assert.match(image,/^data:image/);recognitions++;return "1234";}});
+  assert.equal((await api.login()).ready,true);assert.equal(submits,2);assert.equal(recognitions,1);
+  assert.deepEqual(h.visits,[SSO_LOGIN,GMIS_SSO]);
+  assert.ok(h.account.events.some(event=>event.step==="读取统一认证验证码（保留当前认证步骤）"&&event.phase==="done"));
+  assert.ok(h.account.events.some(event=>event.step==="填写统一认证验证码"&&event.phase==="done"));
 });
 
 test("mandatory interactive challenges stop before any switch, reload, fill or submit", async () => {

@@ -34,7 +34,7 @@ export function createServer(manager, token, {port = PORT, tasks = new Tasks(man
       const args = JSON.parse(body || "{}");
       let result;
       switch (req.url) {
-        case "/health": result = {version: "0.5.0", build: "persistent-tasks-20261020", accounts: manager.list(),tasks:tasks.list()}; break;
+        case "/health": result = {version: "0.5.0", build: "sso-bound-captcha-20261021", accounts: manager.list(),tasks:tasks.list()}; break;
         case "/accounts/add": result = await manager.create(args); break;
         case "/accounts/remove": if(tasks.jobs.get(args.id)?.active)throw fail("请先停止后台任务");result = await manager.remove(args.id);tasks.jobs.delete(args.id);break;
         case "/login/challenge": result = await manager.challenge(args.id, args.runId); break;
@@ -74,7 +74,7 @@ async function main() {
   const server = createServer(manager, token,{tasks});
   server.on("error", error => { console.error(error.code === "EADDRINUSE" ? "8767 端口已占用，请关闭旧后台后重启。" : "后台无法启动：" + error.code); process.exitCode = 1; });
   server.listen(PORT, HOST, () => {
-    console.log("\n北化报名助手多账号后台 0.5.0 · 持续挂机版\n仅监听本机 http://127.0.0.1:8767\n");
+    console.log("\n北化报名助手多账号后台 0.5.0 · 验证码步骤保留修复版（持续挂机）\n仅监听本机 http://127.0.0.1:8767\n");
     console.log("配对码：" + token + "\n\n在扩展控制台粘贴配对码。账号密码仅保存在内存，关闭本窗口即清除。\n挂机任务由本窗口执行，控制台可关闭；电脑须保持开机且不休眠。Ctrl+C 停止全部并退出。\n");
   });
   const shutdown = async () => { server.close(); await tasks.close().catch(()=>{});await manager.close().catch(() => {}); process.exit(); };

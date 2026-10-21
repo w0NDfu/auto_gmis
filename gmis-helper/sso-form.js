@@ -26,7 +26,19 @@ export function inspectSSOForm() {
   const submit = buttons.findIndex(el => visible(el) && (el.id === "submitBtn" ||
     /^(?:立即)?登\s*录$|^sign\s*in$|^login$/i.test((el.textContent || el.value || "").trim())));
   const images = [...document.querySelectorAll("img,canvas")];
-  const captchaImage = captcha ? images.findIndex(el => visible(el) && /captcha|veri.?code|验证码|校验码/i.test([el.id, el.className, el.getAttribute("src"), el.getAttribute("alt")].join(" "))) : -1;
+  const captchaImageScope = captcha ? inputs[captcha.index].closest?.("app-verification,.verification,[role='dialog'],.ant-modal-content,.el-dialog") : null;
+  const scopedImages = images.filter(el=>visible(el)&&(!captchaImageScope||captchaImageScope.contains(el)));
+  const captchaPicture = captcha ? scopedImages.find(el => /captcha|veri.?code|code[-_ ]?(?:img|image)|验证码|校验码/i.test([el.id, el.className, el.getAttribute("src"), el.getAttribute("alt")].join(" "))) ||
+    (captchaImageScope && scopedImages.length===1 ? scopedImages[0] : null) : null;
+  const captchaImage = captchaPicture ? images.indexOf(captchaPicture) : -1;
+  // A supplemental captcha can be shown while the credential fields are hidden/disabled.
+  const captchaScope = captcha ? inputs[captcha.index].closest?.("[role='dialog'],.ant-modal-content,.el-dialog,form,#normalLoginForm") : null;
+  const confirmButtons = buttons.map((el,index)=>({el,index})).filter(({el})=>visible(el) &&
+    /^(?:立即)?登\s*录$|^(?:确定|确认|验证|提交|继续)$|^verify$|^confirm$/i.test((el.textContent||el.value||"").trim()));
+  const scopedConfirm = captchaScope ? confirmButtons.find(({el})=>captchaScope.contains(el)) : null;
+  const supplementalConfirm = !password && confirmButtons.filter(({el})=>/^(?:确定|确认|验证|提交|继续)$|^verify$|^confirm$/i.test((el.textContent||el.value||"").trim()));
+  const captchaSubmit = scopedConfirm?.index ?? (supplementalConfirm?.length===1 ? supplementalConfirm[0].index :
+    password&&username || submit>=0&&buttons[submit].id==="submitBtn" ? submit : -1);
   const notice = [...document.querySelectorAll(".ant-message-error,.ant-form-explain,.ant-form-item-explain-error,.el-message--error,.el-form-item__error,[role='alert'],#login-error-msg")]
     .filter(el => visible(el) || el.id === "login-error-msg").map(el => el.textContent).join(" ").trim();
   const interactiveChallenge =
@@ -44,6 +56,7 @@ export function inspectSSOForm() {
   return {username: username?.index, password: password?.index, captcha: captcha?.index,
     usernameSelector: username?.selector, passwordSelector: password?.selector,
     captchaSelector: captcha?.selector, submitSelector: submit >= 0 && buttons[submit].id ? `[id=${JSON.stringify(buttons[submit].id)}]:visible` : null,
-    captchaImage, submit, notice, interactive, interactiveChallenge, visibleTabs, passwordTabSelector,
+    captchaImage, captchaSubmit, captchaSubmitSelector: captchaSubmit>=0 && buttons[captchaSubmit].id ? `[id=${JSON.stringify(buttons[captchaSubmit].id)}]:visible` : null,
+    submit, notice, interactive, interactiveChallenge, visibleTabs, passwordTabSelector,
     captchaHint: captcha?.hint || "", selectedTab};
 }

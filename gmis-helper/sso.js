@@ -71,12 +71,21 @@ export class SSOLogin {
     account.ready = false; account.challenge = null;
     const retrying = !!account.ssoRetry && new URL(page.url()).origin === SSO_ORIGIN;
     if (!retrying) {
+      account.ssoCaptchaRequired = false;
       await runStep(account, "准备独立认证会话", () => account.context.clearCookies());
       await runStep(account, "打开统一认证页面", () => page.goto(SSO_LOGIN, {waitUntil: "commit", timeout: 30000}));
     }
     account.ssoRetry = false;
     if (new URL(page.url()).origin !== SSO_ORIGIN) throw error("统一认证登录页跳转异常，请重新登录", "SSO_PAGE_CHANGED");
-    let form = await runStep(account, "识别用户名密码登录表单", async () => {
+    let pendingForm;
+    if(retrying){try{pendingForm=await this.read(page);}catch{/* The challenge wait handles a transitioning document. */}}
+    let form, image = null;
+    if(account.ssoCaptchaRequired || pendingForm?.captcha!==undefined){
+      account.ssoRetry=true;
+      // Never navigate or switch tabs away from a challenge raised by the school's submit handler.
+      const captured=await runStep(account,"读取统一认证验证码（保留当前认证步骤）",()=>this.waitForImage(page));
+      form=captured.form;image=captured.image;
+    }else form = await runStep(account, "识别用户名密码登录表单", async () => {
       try { return await this.form(page, {timeout: retrying ? 6000 : 20000}); }
       catch (cause) {
         if (!retrying || cause.code !== "SSO_FORM_NOT_FOUND") throw cause;
@@ -86,31 +95,39 @@ export class SSOLogin {
         return this.form(page);
       }
     });
-    let image = null;
-    if (form.captcha !== undefined) {
+    if (!image && form.captcha !== undefined) {
+      account.ssoCaptchaRequired=true;account.ssoRetry=true;
       if (/短信|手机|动态/.test(form.captchaHint)) {
         throw error("统一认证当前要求短信、滑块或其他二次验证，无法按普通图形验证码自动登录", "LOGIN_INTERACTIVE");
       }
-      image = await runStep(account, "读取统一认证验证码", () => this.waitForImage(page));
-      form = await this.read(page);
+      const captured = await runStep(account, "读取统一认证验证码", () => this.waitForImage(page));
+      image=captured.image;form=captured.form;
     }
     const challengeId = randomUUID();
-    account.challenge = {id: challengeId, form, image, expires: this.now() + 60000, type: "sso"};
+    const mode=image && (form.username===undefined || form.password===undefined) ? "captcha-only" : "credentials";
+    account.challenge = {id: challengeId, form, image, mode, expires: this.now() + 60000, type: "sso"};
+    if(image)account.ssoCaptchaRequired=true;
     account.ssoRetry = true;
-    return {challengeId, image, loginMode: "sso", requiresCaptcha: !!image};
+    return {challengeId, image, loginMode: "sso", requiresCaptcha: !!image, challengeMode:mode};
   }
   async waitForImage(page) {
     const until = this.now() + 10000;
     while (this.now() < until) {
-      const form = await this.read(page);
+      let form;
+      try{form=await this.read(page);}catch(cause){
+        if(!/Execution context was destroyed|Cannot find context|navigation|Frame was detached/i.test(String(cause?.message||"")))throw cause;
+        await this.sleep(200);continue;
+      }
       if (form.interactiveChallenge) throw error("统一认证要求其他二次认证，请在学校页面完成后重试", "LOGIN_INTERACTIVE");
       if (form.captcha !== undefined && form.captchaImage >= 0) {
-        try { return await this.snapshot(page, form.captchaImage); }
+        const submit=form.captchaSubmit??form.submit;
+        if(!(submit>=0)){await this.sleep(200);continue;}
+        try { return {image:await this.snapshot(page, form.captchaImage),form:{...form,submit,submitSelector:form.captchaSubmitSelector||form.submitSelector}}; }
         catch (cause) { if (!/验证码未加载/.test(cause.message)) throw cause; }
       }
       await this.sleep(200);
     }
-    throw error("统一认证图形验证码图片 10 秒内未加载，请重试", "SSO_CAPTCHA_NOT_READY");
+    throw error("统一认证图形验证码输入框、图片或确认按钮 10 秒内未就绪；已保留当前页面，未重新打开登录页，请检查学校认证步骤", "SSO_CAPTCHA_NOT_READY");
   }
   async submit(account, code, challengeId) {
     const page = account.page, challenge = account.challenge;
@@ -119,30 +136,40 @@ export class SSOLogin {
       throw error("统一认证登录页面已变化或验证码过期，请重新获取", "LOGIN_CAPTCHA");
     }
     if (new URL(page.url()).origin !== SSO_ORIGIN) throw error("统一认证页面地址异常，已停止填写凭据", "SSO_PAGE_CHANGED");
-    const form = await runStep(account, "复核统一认证表单", () => this.form(page));
-    if ((form.usernameSelector ?? form.username) !== (challenge.form.usernameSelector ?? challenge.form.username) ||
+    const form = challenge.image ? (await runStep(account,"复核统一认证验证码步骤",()=>this.waitForImage(page))).form :
+      await runStep(account, "复核统一认证表单", () => this.form(page));
+    if (challenge.mode!=="captcha-only" && ((form.usernameSelector ?? form.username) !== (challenge.form.usernameSelector ?? challenge.form.username) ||
       (form.passwordSelector ?? form.password) !== (challenge.form.passwordSelector ?? challenge.form.password) ||
-      (form.submitSelector ?? form.submit) !== (challenge.form.submitSelector ?? challenge.form.submit)) {
+      (form.submitSelector ?? form.submit) !== (challenge.form.submitSelector ?? challenge.form.submit))) {
       throw error("统一认证表单发生变化，请重新获取", "LOGIN_CAPTCHA");
     }
     if (challenge.image) {
       if (!/^[A-Za-z0-9]{4,8}$/.test(code || "") || form.captchaImage < 0 ||
+        (form.captchaSelector??form.captcha)!==(challenge.form.captchaSelector??challenge.form.captcha) ||
+        (form.submitSelector??form.submit)!==(challenge.form.submitSelector??challenge.form.submit) ||
         challenge.image !== await this.snapshot(page, form.captchaImage)) throw error("统一认证验证码已变化或格式无效", "LOGIN_CAPTCHA");
     } else if (form.captcha !== undefined) {
       account.ssoRetry = true;
+      account.ssoCaptchaRequired = true;
       throw error("统一认证新增了验证码，请重新获取", "LOGIN_CAPTCHA");
     }
     account.loginNotice = ""; account.loginCode = code || "";
     account.loginInFlight = true; account.loginAttempt = randomUUID();
     try {
       // Use the original rendered form so its encryption, flow keys and CSRF handling execute normally.
-      await runStep(account, "填写统一认证学号", () => this.input(page, form.username, form.usernameSelector).fill(account.username, {timeout: 10000}));
-      await runStep(account, "填写统一认证密码", () => this.input(page, form.password, form.passwordSelector).fill(account.password, {timeout: 10000}));
-      if (challenge.image) await runStep(account, "填写统一认证验证码", () => this.input(page, form.captcha, form.captchaSelector).fill(code, {timeout: 10000}));
+      if(challenge.mode!=="captcha-only"){
+        await runStep(account, "填写统一认证学号", () => this.input(page, form.username, form.usernameSelector).fill(account.username, {timeout: 10000}));
+        await runStep(account, "填写统一认证密码", () => this.input(page, form.password, form.passwordSelector).fill(account.password, {timeout: 10000}));
+      }
+      if (challenge.image){
+        if(challenge.image!==await this.snapshot(page,form.captchaImage))throw error("填写凭据后验证码已刷新，请重新获取", "LOGIN_CAPTCHA");
+        await runStep(account, "填写统一认证验证码", () => this.input(page, form.captcha, form.captchaSelector).fill(code, {timeout: 10000}));
+      }
       // Do not wait for the portal's scripts/resources as part of the click. The next step observes auth explicitly.
       const submit = form.submitSelector ? page.locator(form.submitSelector) : page.locator("button,input[type='submit'],[role='button']").nth(form.submit);
       await runStep(account, "提交统一身份认证", () => submit.click({noWaitAfter: true, timeout: 10000}));
       await runStep(account, "等待 i 北化认证完成", () => this.waitForPortal(account, form.notice));
+      account.ssoCaptchaRequired=false;account.ssoRetry=false;
     } finally { account.loginInFlight = false; account.loginAttempt = null; account.loginCode = ""; }
     // The authenticated iBUCT portal's Research Student System link targets this exact endpoint.
     // Navigate in the same isolated context, retaining SSO cookies across the OAuth redirects.
@@ -176,7 +203,7 @@ export class SSOLogin {
       }
       if (notice && !/(?:登录|验证)成功|^success$/i.test(notice)) {
         const failure = loginFailure(notice);
-        if (failure.code === "LOGIN_CAPTCHA") account.ssoRetry = true;
+        if (failure.code === "LOGIN_CAPTCHA") {account.ssoRetry = true;account.ssoCaptchaRequired=true;}
         throw error(failure.message, failure.code);
       }
       if (form.interactive && form.captcha === undefined) {
@@ -184,6 +211,7 @@ export class SSOLogin {
       }
       if (form.captcha !== undefined && !account.loginCode) {
         account.ssoRetry = true;
+        account.ssoCaptchaRequired = true;
         throw error("统一认证要求图形验证码，正在获取验证码", "LOGIN_CAPTCHA");
       }
       await this.sleep(200);
